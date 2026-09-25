@@ -1,13 +1,19 @@
 {
   "expo": {
-    "name": "tailshare-mobile",
+    "name": "TailShare",
     "slug": "tailshare-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
+    "scheme": "tailshare",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cuker.tailshare",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "TailShare membutuhkan akses ke galeri foto untuk mengirim gambar dan video langsung ke PC.",
+        "NSPhotoLibraryAddUsageDescription": "TailShare membutuhkan izin untuk menyimpan media dari PC ke galeri iPhone."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -20,6 +26,9 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-sharing"
+    ]
   }
 }
