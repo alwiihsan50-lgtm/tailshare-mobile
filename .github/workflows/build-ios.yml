@@ -34,6 +34,24 @@ jobs:
       - name: 📦 Install Node Dependencies
         run: npm install
 
+      - name: 🩹 Patch Swift Tools Version in Expo Modules (6.2 -> 6.0)
+        run: |
+          node -e '
+          const fs = require("fs");
+          const glob = [
+            "node_modules/expo-modules-jsi/apple/Package.swift",
+            "node_modules/@expo/expo-modules-macros-plugin/apple/Package.swift"
+          ];
+          glob.forEach(f => {
+            if (fs.existsSync(f)) {
+              let content = fs.readFileSync(f, "utf8");
+              content = content.replace(/swift-tools-version:\s*6\.2/g, "swift-tools-version: 6.0");
+              fs.writeFileSync(f, content);
+              console.log("Patched", f);
+            }
+          });
+          '
+
       - name: ⚙️ Expo Prebuild (Generate Native iOS Project)
         run: |
           npx expo prebuild --platform ios --clean
