@@ -38,8 +38,8 @@ extension Task where Failure == any Error {
   console.log('[patch] Replaced Task+immediate.swift');
 }
 
-// 2. Patch RuntimeScheduler.h with instance retain/release methods (.retain, .release)
-// This resolves the lookup error in Swift Clang importer (which looks for .retain on the class instead of failing to find free functions in namespace expo)
+// 2. Patch RuntimeScheduler.h
+// Global-scope retain/release functions for Clang importer lookup + factory methods annotated with swift_name for init synthesis
 const runtimeSchedulerFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'RuntimeScheduler.h');
 if (fs.existsSync(runtimeSchedulerFile)) {
   const rsContent = `#pragma once
@@ -50,8 +50,18 @@ if (fs.existsSync(runtimeSchedulerFile)) {
 #include <swift/bridging>
 
 namespace expo {
+class RuntimeScheduler;
+}
 
-class RuntimeScheduler {
+inline void retainRuntimeScheduler(expo::RuntimeScheduler *scheduler);
+inline void releaseRuntimeScheduler(expo::RuntimeScheduler *scheduler);
+
+namespace expo {
+
+class __attribute__((swift_attr("import_reference")))
+      __attribute__((swift_attr("retain:retainRuntimeScheduler")))
+      __attribute__((swift_attr("release:releaseRuntimeScheduler")))
+RuntimeScheduler {
 public:
   enum class Priority : int {
     ImmediatePriority = 1,
@@ -70,10 +80,10 @@ private:
   std::atomic<int> refCount{1};
 
 public:
-  SWIFT_RETURNS_RETAINED RuntimeScheduler(void *scheduler, ScheduleFn fn) noexcept
+  RuntimeScheduler(void *scheduler, ScheduleFn fn) noexcept
       : nativeScheduler(scheduler), scheduleFn(fn) {}
 
-  SWIFT_RETURNS_RETAINED RuntimeScheduler() {}
+  RuntimeScheduler() {}
 
   RuntimeScheduler(const RuntimeScheduler &) = delete;
 
@@ -89,28 +99,51 @@ public:
     }
   }
 
-  void retain() const noexcept {
-    const_cast<RuntimeScheduler*>(this)->refCount.fetch_add(1, std::memory_order_relaxed);
+  void retain() {
+    refCount.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void release() const noexcept {
-    if (const_cast<RuntimeScheduler*>(this)->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-      delete const_cast<RuntimeScheduler*>(this);
+  void release() {
+    if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete this;
     }
   }
-} __attribute__((swift_attr("import_reference")))
-  __attribute__((swift_attr("retain:.retain")))
-  __attribute__((swift_attr("release:.release")));
+};
+
+inline RuntimeScheduler *createRuntimeScheduler()
+    __attribute__((swift_attr("returns_retained")))
+    __attribute__((swift_name("RuntimeScheduler.init()"))) {
+  return new RuntimeScheduler();
+}
+
+inline RuntimeScheduler *createRuntimeSchedulerWithFn(void *scheduler, RuntimeScheduler::ScheduleFn fn)
+    __attribute__((swift_attr("returns_retained")))
+    __attribute__((swift_name("RuntimeScheduler.init(_:_:)"))) {
+  return new RuntimeScheduler(scheduler, fn);
+}
 
 } // namespace expo
+
+inline void retainRuntimeScheduler(expo::RuntimeScheduler *scheduler) {
+  if (scheduler) {
+    scheduler->retain();
+  }
+}
+
+inline void releaseRuntimeScheduler(expo::RuntimeScheduler *scheduler) {
+  if (scheduler) {
+    scheduler->release();
+  }
+}
 
 #endif // __cplusplus
 `;
   fs.writeFileSync(runtimeSchedulerFile, rsContent, 'utf8');
-  console.log('[patch] Replaced RuntimeScheduler.h with member retain/release');
+  console.log('[patch] Replaced RuntimeScheduler.h with global retain/release and factory inits');
 }
 
-// 3. Patch HostFunctionClosure.h with member retain/release (.retain, .release)
+// 3. Patch HostFunctionClosure.h
+// Global-scope retain/release functions + factory method for init synthesis
 const hostClosureFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'HostFunctionClosure.h');
 if (fs.existsSync(hostClosureFile)) {
   const hcContent = `#pragma once
@@ -120,12 +153,22 @@ if (fs.existsSync(hostClosureFile)) {
 #include "RetainedSwiftPointer.h"
 
 namespace expo {
+class HostFunctionClosure;
+}
 
-class HostFunctionClosure final : public RetainedSwiftPointer {
+inline void retainHostFunctionClosure(expo::HostFunctionClosure *closure);
+inline void releaseHostFunctionClosure(expo::HostFunctionClosure *closure);
+
+namespace expo {
+
+class __attribute__((swift_attr("import_reference")))
+      __attribute__((swift_attr("retain:retainHostFunctionClosure")))
+      __attribute__((swift_attr("release:releaseHostFunctionClosure")))
+HostFunctionClosure final : public RetainedSwiftPointer {
 public:
   using Closure = bool(Context context, const facebook::jsi::Value *_Nonnull thisValue, const facebook::jsi::Value *_Nonnull args, size_t count, facebook::jsi::Value *_Nonnull result);
 
-  SWIFT_RETURNS_RETAINED explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
+  explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
 
   virtual ~HostFunctionClosure() {
     _deallocator(_context);
@@ -135,22 +178,27 @@ public:
     return _closure(_context, &thisValue, args, count, &result);
   }
 
-  void retain() const noexcept {}
-  void release() const noexcept {
-    delete const_cast<HostFunctionClosure*>(this);
-  }
-
 private:
   Closure *_Nonnull _closure;
 
-} __attribute__((swift_attr("import_reference")))
-  __attribute__((swift_attr("retain:.retain")))
-  __attribute__((swift_attr("release:.release")));
+};
+
+inline HostFunctionClosure *createHostFunctionClosure(RetainedSwiftPointer::Context context, HostFunctionClosure::Closure closure, RetainedSwiftPointer::Deallocator deallocator)
+    __attribute__((swift_attr("returns_retained")))
+    __attribute__((swift_name("HostFunctionClosure.init(_:_:_:)"))) {
+  return new HostFunctionClosure(context, closure, deallocator);
+}
 
 } // namespace expo
+
+inline void retainHostFunctionClosure(expo::HostFunctionClosure *closure) {}
+
+inline void releaseHostFunctionClosure(expo::HostFunctionClosure *closure) {
+  delete closure;
+}
 `;
   fs.writeFileSync(hostClosureFile, hcContent, 'utf8');
-  console.log('[patch] Replaced HostFunctionClosure.h with member retain/release');
+  console.log('[patch] Replaced HostFunctionClosure.h with global retain/release and factory init');
 }
 
 // 4. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
