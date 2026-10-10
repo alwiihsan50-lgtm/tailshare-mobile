@@ -36,9 +36,18 @@ targetDirs.forEach(dir => {
           changed = true;
         }
 
-        // Fix weak let -> weak var
+        // Fix weak let and Sendable mutable properties with nonisolated(unsafe) weak var
+        if (content.includes('weak let runtime') || content.includes('weak var runtime')) {
+          content = content.replace(/(nonisolated\(unsafe\)\s+)?(private|internal)?\s*weak\s+(let|var)\s+runtime/g, (match, prefix, visibility) => {
+            const vis = visibility ? visibility + ' ' : '';
+            return `nonisolated(unsafe) ${vis}weak var runtime`;
+          });
+          changed = true;
+        }
+
+        // Any other weak let
         if (content.includes('weak let')) {
-          content = content.replace(/\bweak\s+let\b/g, 'weak var');
+          content = content.replace(/\bweak\s+let\b/g, 'nonisolated(unsafe) weak var');
           changed = true;
         }
 
