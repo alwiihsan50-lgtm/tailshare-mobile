@@ -518,4 +518,16 @@ if (fs.existsSync(coreDir)) {
   console.log('[patch] Applied surgical Swift 6 compatibility fixes to expo-modules-core');
 }
 
+// 9. Fix expo-image-picker compilation error on Xcode 16 (PHAsset.contentType)
+const imagePickerMediaHandler = path.join(__dirname, '..', 'node_modules', 'expo-image-picker', 'ios', 'MediaHandler.swift');
+if (fs.existsSync(imagePickerMediaHandler)) {
+  let c = fs.readFileSync(imagePickerMediaHandler, 'utf8');
+  c = c.replace(/let\s+utType:\s*UTType\?\s*=\s*if\s+#available\(iOS\s*26\.0,\s*\*\)\s*\{\s*asset\?\.contentType\s*\?\?\s*UTType\(filenameExtension:\s*fileExtension\)\s*\}\s*else\s*\{\s*UTType\(filenameExtension:\s*fileExtension\)\s*\}/,
+    'let utType: UTType? = UTType(filenameExtension: fileExtension)');
+  c = c.replace(/let\s+utType:\s*UTType\?\s*=\s*if\s+#available\(iOS\s*26\.0,\s*\*\)\s*\{\s*resource\.contentType\s*\}\s*else\s*\{\s*UTType\(resource\.uniformTypeIdentifier\)\s*\?\?\s*UTType\(filenameExtension:\s*fileExtension\)\s*\}/,
+    'let utType: UTType? = UTType(resource.uniformTypeIdentifier) ?? UTType(filenameExtension: fileExtension)');
+  fs.writeFileSync(imagePickerMediaHandler, c, 'utf8');
+  console.log('[patch] Patched expo-image-picker MediaHandler.swift');
+}
+
 
