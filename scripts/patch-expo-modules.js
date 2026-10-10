@@ -331,12 +331,37 @@ if (fs.existsSync(jsRuntimeFile)) {
   console.log('[patch] Patched JavaScriptRuntime.swift with factory create calls, appendPropNameForUtf8, and Swift 6 concurrency safe bitPattern casts');
 }
 
+// 6. Disable Expo precompiled modules so everything builds from source (avoids Swift 6.3 vs 6.1 swiftinterface mismatch)
+const precompiledFile = path.join(__dirname, '..', 'node_modules', 'expo-modules-autolinking', 'scripts', 'ios', 'precompiled_modules.rb');
+if (fs.existsSync(precompiledFile)) {
+  let pcContent = fs.readFileSync(precompiledFile, 'utf8');
+  if (!pcContent.includes('def enabled?\n        return false')) {
+    pcContent = pcContent.replace('def enabled?', 'def enabled?\n        return false');
+  }
+  if (!pcContent.includes('def try_link_with_prebuilt_xcframework(spec)\n        return false')) {
+    pcContent = pcContent.replace('def try_link_with_prebuilt_xcframework(spec)', 'def try_link_with_prebuilt_xcframework(spec)\n        return false');
+  }
+  fs.writeFileSync(precompiledFile, pcContent, 'utf8');
+  console.log('[patch] Disabled precompiled modules in precompiled_modules.rb (forcing source build)');
+}
 
-// 6. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
-const targetDirs = [
-  path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi'),
-  path.join(__dirname, '..', 'node_modules', '@expo', 'expo-modules-macros-plugin')
-];
+// 7. Walk all Expo package directories for general fixes (Sendable, weak let, trailing commas, swift-tools-version)
+const nodeModulesDir = path.join(__dirname, '..', 'node_modules');
+const targetDirs = [];
+if (fs.existsSync(nodeModulesDir)) {
+  fs.readdirSync(nodeModulesDir).forEach(name => {
+    if (name.startsWith('expo') || name.startsWith('@expo')) {
+      const p = path.join(nodeModulesDir, name);
+      if (fs.statSync(p).isDirectory()) {
+        if (name === '@expo') {
+          fs.readdirSync(p).forEach(sub => targetDirs.push(path.join(p, sub)));
+        } else {
+          targetDirs.push(p);
+        }
+      }
+    }
+  });
+}
 
 targetDirs.forEach(dir => {
   if (fs.existsSync(dir)) {
@@ -367,8 +392,8 @@ targetDirs.forEach(dir => {
           changed = true;
         }
 
-        // Fix trailing commas before closing parentheses
-        if (content.match(/,\s*\)/)) {
+        // Fix trailing commas before closing parentheses in Swift files
+        if (f.endsWith('.swift') && content.match(/,\s*\)/)) {
           content = content.replace(/,\s*\)/g, ')');
           changed = true;
         }
@@ -381,3 +406,4 @@ targetDirs.forEach(dir => {
     });
   }
 });
+

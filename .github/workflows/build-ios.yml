@@ -33,8 +33,11 @@ jobs:
         run: node scripts/patch-expo-modules.js
 
       - name: ⚙️ Expo Prebuild (Generate Native iOS Project)
+        env:
+          EXPO_USE_PRECOMPILED_MODULES: "0"
         run: |
           npx expo prebuild --platform ios --clean
+
 
       - name: 🔨 Compile iOS Project with Xcode
         run: |
