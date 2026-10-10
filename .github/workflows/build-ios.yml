@@ -1,0 +1,61 @@
+name: Build iOS IPA (Unsigned for Sideloading)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+
+jobs:
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 📦 Install Node Dependencies
+        run: npm install
+
+      - name: ⚙️ Expo Prebuild (Generate Native iOS Project)
+        run: |
+          npx expo prebuild --platform ios --clean
+
+      - name: 🔨 Compile iOS Project with Xcode
+        run: |
+          xcodebuild archive \
+            -workspace ios/TailShare.xcworkspace \
+            -scheme TailShare \
+            -configuration Release \
+            -archivePath build/TailShare.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 📦 Package App into IPA (Payload Format)
+        run: |
+          mkdir -p build/Payload
+          cp -r build/TailShare.xcarchive/Products/Applications/TailShare.app build/Payload/
+          cd build
+          zip -qr TailShare.ipa Payload
+          ls -lh TailShare.ipa
+
+      - name: 🚀 Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TailShare-iOS-IPA
+          path: build/TailShare.ipa
+          retention-days: 14
