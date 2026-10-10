@@ -19,7 +19,7 @@ function walk(dir) {
 
 const baseDir = path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi');
 
-// 1. Patch Task+immediate.swift (remove speculative iOS 26 Task.immediate API)
+// 1. Patch Task+immediate.swift (standard Task init without unsupported name: parameter)
 const taskImmediateFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Extensions', 'Task+immediate.swift');
 if (fs.existsSync(taskImmediateFile)) {
   const content = `// Polyfill for Task.immediate
@@ -30,7 +30,7 @@ extension Task where Failure == any Error {
     priority: TaskPriority? = nil,
     @_inheritActorContext @_implicitSelfCapture operation: sending @escaping @isolated(any) () async throws -> Success
   ) -> Task<Success, any Error> {
-    return Task(name: name, priority: priority ?? .high, operation: operation)
+    return Task(priority: priority ?? .high, operation: operation)
   }
 }
 `;
@@ -38,8 +38,24 @@ extension Task where Failure == any Error {
   console.log('[patch] Replaced Task+immediate.swift');
 }
 
-// 2. Patch RuntimeScheduler.h
-// Global-scope retain/release functions for Clang importer lookup + factory methods annotated with swift_name for init synthesis
+// 2. Patch HostObjectCallbacks.h with appendPropNameForUtf8 C++ helper
+const hostCallbacksFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'HostObjectCallbacks.h');
+if (fs.existsSync(hostCallbacksFile)) {
+  let hcContent = fs.readFileSync(hostCallbacksFile, 'utf8');
+  if (!hcContent.includes('appendPropNameForUtf8')) {
+    hcContent = hcContent.replace('#include "RetainedSwiftPointer.h"', '#include "RetainedSwiftPointer.h"\n#include "IRuntimeCompat.h"');
+    const helperCode = `
+inline void appendPropNameForUtf8(std::vector<facebook::jsi::PropNameID> &vector, facebook::jsi::IRuntime &runtime, const char *_Nonnull utf8) {
+  vector.push_back(facebook::jsi::PropNameID::forUtf8(runtime, utf8));
+}
+} // namespace expo`;
+    hcContent = hcContent.replace('} // namespace expo', helperCode);
+    fs.writeFileSync(hostCallbacksFile, hcContent, 'utf8');
+    console.log('[patch] Added appendPropNameForUtf8 in HostObjectCallbacks.h');
+  }
+}
+
+// 3. Patch RuntimeScheduler.h with static create factory methods and global retain/release
 const runtimeSchedulerFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'RuntimeScheduler.h');
 if (fs.existsSync(runtimeSchedulerFile)) {
   const rsContent = `#pragma once
@@ -87,6 +103,14 @@ public:
 
   RuntimeScheduler(const RuntimeScheduler &) = delete;
 
+  static RuntimeScheduler *create() {
+    return new RuntimeScheduler();
+  }
+
+  static RuntimeScheduler *create(void *scheduler, ScheduleFn fn) {
+    return new RuntimeScheduler(scheduler, fn);
+  }
+
   bool supportsAsyncScheduling() const noexcept {
     return scheduleFn != nullptr;
   }
@@ -110,18 +134,6 @@ public:
   }
 };
 
-inline RuntimeScheduler *createRuntimeScheduler()
-    __attribute__((swift_attr("returns_retained")))
-    __attribute__((swift_name("RuntimeScheduler.init()"))) {
-  return new RuntimeScheduler();
-}
-
-inline RuntimeScheduler *createRuntimeSchedulerWithFn(void *scheduler, RuntimeScheduler::ScheduleFn fn)
-    __attribute__((swift_attr("returns_retained")))
-    __attribute__((swift_name("RuntimeScheduler.init(_:_:)"))) {
-  return new RuntimeScheduler(scheduler, fn);
-}
-
 } // namespace expo
 
 inline void retainRuntimeScheduler(expo::RuntimeScheduler *scheduler) {
@@ -139,11 +151,10 @@ inline void releaseRuntimeScheduler(expo::RuntimeScheduler *scheduler) {
 #endif // __cplusplus
 `;
   fs.writeFileSync(runtimeSchedulerFile, rsContent, 'utf8');
-  console.log('[patch] Replaced RuntimeScheduler.h with global retain/release and factory inits');
+  console.log('[patch] Replaced RuntimeScheduler.h with static factory create methods');
 }
 
-// 3. Patch HostFunctionClosure.h
-// Global-scope retain/release functions + factory method for init synthesis
+// 4. Patch HostFunctionClosure.h with static create factory and global retain/release
 const hostClosureFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'HostFunctionClosure.h');
 if (fs.existsSync(hostClosureFile)) {
   const hcContent = `#pragma once
@@ -170,6 +181,10 @@ public:
 
   explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
 
+  static HostFunctionClosure *create(Context context, Closure closure, Deallocator deallocator) {
+    return new HostFunctionClosure(context, closure, deallocator);
+  }
+
   virtual ~HostFunctionClosure() {
     _deallocator(_context);
   }
@@ -183,12 +198,6 @@ private:
 
 };
 
-inline HostFunctionClosure *createHostFunctionClosure(RetainedSwiftPointer::Context context, HostFunctionClosure::Closure closure, RetainedSwiftPointer::Deallocator deallocator)
-    __attribute__((swift_attr("returns_retained")))
-    __attribute__((swift_name("HostFunctionClosure.init(_:_:_:)"))) {
-  return new HostFunctionClosure(context, closure, deallocator);
-}
-
 } // namespace expo
 
 inline void retainHostFunctionClosure(expo::HostFunctionClosure *closure) {}
@@ -198,10 +207,31 @@ inline void releaseHostFunctionClosure(expo::HostFunctionClosure *closure) {
 }
 `;
   fs.writeFileSync(hostClosureFile, hcContent, 'utf8');
-  console.log('[patch] Replaced HostFunctionClosure.h with global retain/release and factory init');
+  console.log('[patch] Replaced HostFunctionClosure.h with static factory create method');
 }
 
-// 4. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
+// 5. Patch JavaScriptRuntime.swift to use factory methods and appendPropNameForUtf8
+const jsRuntimeFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Runtime', 'JavaScriptRuntime.swift');
+if (fs.existsSync(jsRuntimeFile)) {
+  let jsContent = fs.readFileSync(jsRuntimeFile, 'utf8');
+  // Use static factory create methods
+  jsContent = jsContent.replace(/expo\.RuntimeScheduler\(\)/g, 'expo.RuntimeScheduler.create()');
+  jsContent = jsContent.replace(/expo\.RuntimeScheduler\(scheduler,\s*fn\)/g, 'expo.RuntimeScheduler.create(scheduler, fn)');
+  jsContent = jsContent.replace(/expo\.HostFunctionClosure\(context,\s*call,\s*deallocate\)/g, 'expo.HostFunctionClosure.create(context, call, deallocate)');
+  // Replace property name loop with appendPropNameForUtf8
+  const loopRegex = /for propertyName in propertyNames \{[\s\S]*?vector\.push_back[\s\S]*?\}/;
+  if (loopRegex.test(jsContent)) {
+    jsContent = jsContent.replace(loopRegex, `for propertyName in propertyNames {
+        propertyName.withCString { cStr in
+          expo.appendPropNameForUtf8(&vector, iRuntime, cStr)
+        }
+      }`);
+  }
+  fs.writeFileSync(jsRuntimeFile, jsContent, 'utf8');
+  console.log('[patch] Patched JavaScriptRuntime.swift with factory create calls and appendPropNameForUtf8');
+}
+
+// 6. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
 const targetDirs = [
   path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi'),
   path.join(__dirname, '..', 'node_modules', '@expo', 'expo-modules-macros-plugin')
