@@ -506,6 +506,15 @@ if (fs.existsSync(coreDir)) {
     fs.writeFileSync(corePodspec, c, 'utf8');
   }
 
+  // 8l. SwiftUIViewDefinition.swift (Add @MainActor to view builder functions)
+  const viewDefFile2 = path.join(coreDir, 'ios', 'Core', 'Views', 'SwiftUI', 'SwiftUIViewDefinition.swift');
+  if (fs.existsSync(viewDefFile2)) {
+    let c = fs.readFileSync(viewDefFile2, 'utf8');
+    c = c.replace(/public\s+func\s+Children/g, '@MainActor public func Children');
+    c = c.replace(/public\s+func\s+UnwrappedChildren/g, '@MainActor public func UnwrappedChildren');
+    fs.writeFileSync(viewDefFile2, c, 'utf8');
+  }
+
   console.log('[patch] Applied surgical Swift 6 compatibility fixes to expo-modules-core');
 }
 
