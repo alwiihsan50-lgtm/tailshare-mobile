@@ -38,16 +38,8 @@ extension Task where Failure == any Error {
   console.log('[patch] Replaced Task+immediate.swift');
 }
 
-// 2. Patch JavaScriptRuntime.swift
-const jsRuntimeFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Runtime', 'JavaScriptRuntime.swift');
-if (fs.existsSync(jsRuntimeFile)) {
-  let content = fs.readFileSync(jsRuntimeFile, 'utf8');
-  content = content.replace(/vector\.push_back\(consuming:\s*propNameId\)/g, 'vector.push_back(propNameId)');
-  fs.writeFileSync(jsRuntimeFile, content, 'utf8');
-  console.log('[patch] Fixed vector.push_back in JavaScriptRuntime.swift');
-}
-
-// 3. Patch RuntimeScheduler.h with SWIFT_IMMORTAL_REFERENCE (removes unresolved retain/release functions and constructor attributes)
+// 2. Patch RuntimeScheduler.h with instance retain/release methods (.retain, .release)
+// This resolves the lookup error in Swift Clang importer (which looks for .retain on the class instead of failing to find free functions in namespace expo)
 const runtimeSchedulerFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'RuntimeScheduler.h');
 if (fs.existsSync(runtimeSchedulerFile)) {
   const rsContent = `#pragma once
@@ -78,10 +70,10 @@ private:
   std::atomic<int> refCount{1};
 
 public:
-  RuntimeScheduler(void *scheduler, ScheduleFn fn) noexcept
+  SWIFT_RETURNS_RETAINED RuntimeScheduler(void *scheduler, ScheduleFn fn) noexcept
       : nativeScheduler(scheduler), scheduleFn(fn) {}
 
-  RuntimeScheduler() {}
+  SWIFT_RETURNS_RETAINED RuntimeScheduler() {}
 
   RuntimeScheduler(const RuntimeScheduler &) = delete;
 
@@ -97,26 +89,28 @@ public:
     }
   }
 
-  void retain() {
-    refCount.fetch_add(1, std::memory_order_relaxed);
+  void retain() const noexcept {
+    const_cast<RuntimeScheduler*>(this)->refCount.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void release() {
-    if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-      delete this;
+  void release() const noexcept {
+    if (const_cast<RuntimeScheduler*>(this)->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete const_cast<RuntimeScheduler*>(this);
     }
   }
-} SWIFT_IMMORTAL_REFERENCE;
+} __attribute__((swift_attr("import_reference")))
+  __attribute__((swift_attr("retain:.retain")))
+  __attribute__((swift_attr("release:.release")));
 
 } // namespace expo
 
 #endif // __cplusplus
 `;
   fs.writeFileSync(runtimeSchedulerFile, rsContent, 'utf8');
-  console.log('[patch] Replaced RuntimeScheduler.h with SWIFT_IMMORTAL_REFERENCE');
+  console.log('[patch] Replaced RuntimeScheduler.h with member retain/release');
 }
 
-// 4. Patch HostFunctionClosure.h with SWIFT_IMMORTAL_REFERENCE (matches RetainedSwiftPointer base class)
+// 3. Patch HostFunctionClosure.h with member retain/release (.retain, .release)
 const hostClosureFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'HostFunctionClosure.h');
 if (fs.existsSync(hostClosureFile)) {
   const hcContent = `#pragma once
@@ -131,7 +125,7 @@ class HostFunctionClosure final : public RetainedSwiftPointer {
 public:
   using Closure = bool(Context context, const facebook::jsi::Value *_Nonnull thisValue, const facebook::jsi::Value *_Nonnull args, size_t count, facebook::jsi::Value *_Nonnull result);
 
-  explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
+  SWIFT_RETURNS_RETAINED explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
 
   virtual ~HostFunctionClosure() {
     _deallocator(_context);
@@ -141,18 +135,25 @@ public:
     return _closure(_context, &thisValue, args, count, &result);
   }
 
+  void retain() const noexcept {}
+  void release() const noexcept {
+    delete const_cast<HostFunctionClosure*>(this);
+  }
+
 private:
   Closure *_Nonnull _closure;
 
-} SWIFT_IMMORTAL_REFERENCE;
+} __attribute__((swift_attr("import_reference")))
+  __attribute__((swift_attr("retain:.retain")))
+  __attribute__((swift_attr("release:.release")));
 
 } // namespace expo
 `;
   fs.writeFileSync(hostClosureFile, hcContent, 'utf8');
-  console.log('[patch] Replaced HostFunctionClosure.h with SWIFT_IMMORTAL_REFERENCE');
+  console.log('[patch] Replaced HostFunctionClosure.h with member retain/release');
 }
 
-// 5. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
+// 4. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
 const targetDirs = [
   path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi'),
   path.join(__dirname, '..', 'node_modules', '@expo', 'expo-modules-macros-plugin')
@@ -184,12 +185,6 @@ targetDirs.forEach(dir => {
         // Any other weak let
         if (content.includes('weak let')) {
           content = content.replace(/\bweak\s+let\b/g, 'nonisolated(unsafe) weak var');
-          changed = true;
-        }
-
-        // Strip SWIFT_RETURNS_RETAINED on any constructor
-        if (content.includes('SWIFT_RETURNS_RETAINED')) {
-          content = content.replace(/SWIFT_RETURNS_RETAINED\s+/g, '');
           changed = true;
         }
 
