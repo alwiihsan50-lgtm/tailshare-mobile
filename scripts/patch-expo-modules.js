@@ -17,6 +17,161 @@ function walk(dir) {
   return results;
 }
 
+const baseDir = path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi');
+
+// 1. Patch Task+immediate.swift
+const taskImmediateFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Extensions', 'Task+immediate.swift');
+if (fs.existsSync(taskImmediateFile)) {
+  const content = `// Polyfill for Task.immediate
+extension Task where Failure == any Error {
+  @discardableResult
+  public static func immediate_polyfill(
+    name: String? = nil,
+    priority: TaskPriority? = nil,
+    @_inheritActorContext @_implicitSelfCapture operation: sending @escaping @isolated(any) () async throws -> Success
+  ) -> Task<Success, any Error> {
+    return Task(priority: priority ?? .high, operation: operation)
+  }
+}
+`;
+  fs.writeFileSync(taskImmediateFile, content, 'utf8');
+  console.log('[patch] Replaced Task+immediate.swift');
+}
+
+// 2. Patch JavaScriptRuntime.swift
+const jsRuntimeFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Runtime', 'JavaScriptRuntime.swift');
+if (fs.existsSync(jsRuntimeFile)) {
+  let content = fs.readFileSync(jsRuntimeFile, 'utf8');
+  content = content.replace(/vector\.push_back\(consuming:\s*propNameId\)/g, 'vector.push_back(propNameId)');
+  fs.writeFileSync(jsRuntimeFile, content, 'utf8');
+  console.log('[patch] Fixed vector.push_back in JavaScriptRuntime.swift');
+}
+
+// 3. Patch RuntimeScheduler.h
+const runtimeSchedulerFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'RuntimeScheduler.h');
+if (fs.existsSync(runtimeSchedulerFile)) {
+  const rsContent = `#pragma once
+
+#ifdef __cplusplus
+
+#include <atomic>
+#include <swift/bridging>
+
+namespace expo {
+
+class RuntimeScheduler;
+void retainRuntimeScheduler(RuntimeScheduler *scheduler);
+void releaseRuntimeScheduler(RuntimeScheduler *scheduler);
+
+class RuntimeScheduler {
+public:
+  enum class Priority : int {
+    ImmediatePriority = 1,
+    UserBlockingPriority = 2,
+    NormalPriority = 3,
+    LowPriority = 4,
+    IdlePriority = 5,
+  };
+
+  using ScheduleTaskCallback = void(^)();
+  using ScheduleFn = void (*)(void *nativeScheduler, int priority, ScheduleTaskCallback callback);
+
+private:
+  void *const nativeScheduler{nullptr};
+  const ScheduleFn scheduleFn{nullptr};
+  std::atomic<int> refCount{1};
+
+public:
+  SWIFT_RETURNS_RETAINED RuntimeScheduler(void *scheduler, ScheduleFn fn) noexcept
+      : nativeScheduler(scheduler), scheduleFn(fn) {}
+
+  SWIFT_RETURNS_RETAINED RuntimeScheduler() {}
+
+  RuntimeScheduler(const RuntimeScheduler &) = delete;
+
+  bool supportsAsyncScheduling() const noexcept {
+    return scheduleFn != nullptr;
+  }
+
+  void scheduleTask(Priority priority, ScheduleTaskCallback callback) noexcept {
+    if (scheduleFn != nullptr) {
+      scheduleFn(nativeScheduler, static_cast<int>(priority), callback);
+    } else {
+      callback();
+    }
+  }
+
+  void retain() {
+    refCount.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void release() {
+    if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete this;
+    }
+  }
+} SWIFT_SHARED_REFERENCE(retainRuntimeScheduler, releaseRuntimeScheduler);
+
+inline void retainRuntimeScheduler(RuntimeScheduler *scheduler) {
+  scheduler->retain();
+}
+
+inline void releaseRuntimeScheduler(RuntimeScheduler *scheduler) {
+  scheduler->release();
+}
+
+} // namespace expo
+
+#endif // __cplusplus
+`;
+  fs.writeFileSync(runtimeSchedulerFile, rsContent, 'utf8');
+  console.log('[patch] Replaced RuntimeScheduler.h');
+}
+
+// 4. Patch HostFunctionClosure.h
+const hostClosureFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI-Cxx', 'include', 'HostFunctionClosure.h');
+if (fs.existsSync(hostClosureFile)) {
+  const hcContent = `#pragma once
+
+#include <swift/bridging>
+#include <jsi/jsi.h>
+#include "RetainedSwiftPointer.h"
+
+namespace expo {
+
+class HostFunctionClosure;
+void retainHostFunctionClosure(HostFunctionClosure *closure);
+void releaseHostFunctionClosure(HostFunctionClosure *closure);
+
+class HostFunctionClosure final : public RetainedSwiftPointer {
+public:
+  using Closure = bool(Context context, const facebook::jsi::Value *_Nonnull thisValue, const facebook::jsi::Value *_Nonnull args, size_t count, facebook::jsi::Value *_Nonnull result);
+
+  SWIFT_RETURNS_RETAINED explicit HostFunctionClosure(Context context, Closure closure, Deallocator deallocator) : RetainedSwiftPointer(context, deallocator), _closure(closure) {};
+
+  virtual ~HostFunctionClosure() {
+    _deallocator(_context);
+  }
+
+  inline bool call(const facebook::jsi::Value &thisValue, const facebook::jsi::Value *_Nonnull args, size_t count, facebook::jsi::Value &result) const {
+    return _closure(_context, &thisValue, args, count, &result);
+  }
+
+private:
+  Closure *_Nonnull _closure;
+
+} SWIFT_SHARED_REFERENCE(retainHostFunctionClosure, releaseHostFunctionClosure);
+
+inline void retainHostFunctionClosure(HostFunctionClosure *closure) {}
+inline void releaseHostFunctionClosure(HostFunctionClosure *closure) { delete closure; }
+
+} // namespace expo
+`;
+  fs.writeFileSync(hostClosureFile, hcContent, 'utf8');
+  console.log('[patch] Replaced HostFunctionClosure.h');
+}
+
+// 5. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
 const targetDirs = [
   path.join(__dirname, '..', 'node_modules', 'expo-modules-jsi'),
   path.join(__dirname, '..', 'node_modules', '@expo', 'expo-modules-macros-plugin')
@@ -48,12 +203,6 @@ targetDirs.forEach(dir => {
         // Any other weak let
         if (content.includes('weak let')) {
           content = content.replace(/\bweak\s+let\b/g, 'nonisolated(unsafe) weak var');
-          changed = true;
-        }
-
-        // Fix C++ constructor return attribute
-        if (content.includes('SWIFT_RETURNS_RETAINED RuntimeScheduler(')) {
-          content = content.replace(/SWIFT_RETURNS_RETAINED\s+RuntimeScheduler\(/g, 'RuntimeScheduler(');
           changed = true;
         }
 
