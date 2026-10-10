@@ -210,7 +210,7 @@ inline void releaseHostFunctionClosure(expo::HostFunctionClosure *closure) {
   console.log('[patch] Replaced HostFunctionClosure.h with static factory create method');
 }
 
-// 5. Patch JavaScriptRuntime.swift to use factory methods and appendPropNameForUtf8
+// 5. Patch JavaScriptRuntime.swift to use factory methods, appendPropNameForUtf8, and solve Swift 6 concurrency errors
 const jsRuntimeFile = path.join(baseDir, 'apple', 'Sources', 'ExpoModulesJSI', 'Runtime', 'JavaScriptRuntime.swift');
 if (fs.existsSync(jsRuntimeFile)) {
   let jsContent = fs.readFileSync(jsRuntimeFile, 'utf8');
@@ -227,9 +227,110 @@ if (fs.existsSync(jsRuntimeFile)) {
         }
       }`);
   }
+
+  // Swift 6 strict concurrency fixes: passing pointers across actor isolation boundaries
+  const getterTarget = `      let propertyName = String(cString: propertyName)
+      nonisolated(unsafe) let resultPtr = resultPtr
+
+      return withGuaranteedContext(context) { (context: HostObjectContext, runtime) in
+        return JavaScriptActor.assumeIsolated {
+          return forwardingSwiftErrorsToJS(runtime: runtime) {
+            try context.get(propertyName).writeJSIValue(to: resultPtr)
+          }
+        }
+      }`;
+
+  const getterReplacement = `      let propertyName = String(cString: propertyName)
+      let resultPtrBits = UInt(bitPattern: resultPtr)
+
+      return withGuaranteedContext(context) { (context: HostObjectContext, runtime) in
+        return JavaScriptActor.assumeIsolated {
+          let resultPtr = UnsafeMutablePointer<facebook.jsi.Value>(bitPattern: resultPtrBits)!
+          return forwardingSwiftErrorsToJS(runtime: runtime) {
+            try context.get(propertyName).writeJSIValue(to: resultPtr)
+          }
+        }
+      }`;
+  jsContent = jsContent.replace(getterTarget, getterReplacement);
+
+  const fn1Target = `    nonisolated(unsafe) let thisPtr = thisPtr
+    nonisolated(unsafe) let argumentsPtr = argumentsPtr
+    nonisolated(unsafe) let resultPtr = resultPtr
+
+    // See \`withGuaranteedContext\` for why neither the context nor the runtime is retained here, and
+    // why the result is written to the caller's slot instead of being returned.
+    return withGuaranteedContext(context) { (context: HostFunctionContext, runtime) in
+      return JavaScriptActor.assumeIsolated {
+        return forwardingSwiftErrorsToJS(runtime: runtime) {
+          let this = UnsafeMutablePointer(mutating: thisPtr).move()
+          let arguments = JavaScriptValuesBuffer(runtime, start: argumentsPtr, count: argumentsCount)
+          let thisValue = JavaScriptValue(runtime, this)
+          try context.call(thisValue, consume arguments).writeJSIValue(to: resultPtr)
+        }
+      }
+    }`;
+
+  const fn1Replacement = `    let thisPtrBits = UInt(bitPattern: thisPtr)
+    let argumentsPtrBits = UInt(bitPattern: argumentsPtr)
+    let resultPtrBits = UInt(bitPattern: resultPtr)
+
+    // See \`withGuaranteedContext\` for why neither the context nor the runtime is retained here, and
+    // why the result is written to the caller's slot instead of being returned.
+    return withGuaranteedContext(context) { (context: HostFunctionContext, runtime) in
+      return JavaScriptActor.assumeIsolated {
+        let thisPtr = UnsafePointer<facebook.jsi.Value>(bitPattern: thisPtrBits)!
+        let argumentsPtr = UnsafePointer<facebook.jsi.Value>(bitPattern: argumentsPtrBits)
+        let resultPtr = UnsafeMutablePointer<facebook.jsi.Value>(bitPattern: resultPtrBits)!
+        return forwardingSwiftErrorsToJS(runtime: runtime) {
+          let this = UnsafeMutablePointer(mutating: thisPtr).move()
+          let arguments = JavaScriptValuesBuffer(runtime, start: argumentsPtr, count: argumentsCount)
+          let thisValue = JavaScriptValue(runtime, this)
+          try context.call(thisValue, consume arguments).writeJSIValue(to: resultPtr)
+        }
+      }
+    }`;
+  jsContent = jsContent.replace(fn1Target, fn1Replacement);
+
+  const fn2Target = `    nonisolated(unsafe) let thisPtr = thisPtr
+    nonisolated(unsafe) let argumentsPtr = argumentsPtr
+    nonisolated(unsafe) let resultPtr = resultPtr
+
+    // See \`withGuaranteedContext\` for why neither the context nor the runtime is retained here, and
+    // why the result is written to the caller's slot instead of being returned.
+    return withGuaranteedContext(context) { (context: UnownedThisHostFunctionContext, runtime) in
+      return JavaScriptActor.assumeIsolated {
+        return forwardingSwiftErrorsToJS(runtime: runtime) {
+          let arguments = JavaScriptValuesBuffer(runtime, start: argumentsPtr, count: argumentsCount)
+          let thisValue = JavaScriptUnownedValue(runtime.pointee, thisPtr)
+          try context.call(thisValue, consume arguments).writeJSIValue(to: resultPtr)
+        }
+      }
+    }`;
+
+  const fn2Replacement = `    let thisPtrBits = UInt(bitPattern: thisPtr)
+    let argumentsPtrBits = UInt(bitPattern: argumentsPtr)
+    let resultPtrBits = UInt(bitPattern: resultPtr)
+
+    // See \`withGuaranteedContext\` for why neither the context nor the runtime is retained here, and
+    // why the result is written to the caller's slot instead of being returned.
+    return withGuaranteedContext(context) { (context: UnownedThisHostFunctionContext, runtime) in
+      return JavaScriptActor.assumeIsolated {
+        let thisPtr = UnsafePointer<facebook.jsi.Value>(bitPattern: thisPtrBits)!
+        let argumentsPtr = UnsafePointer<facebook.jsi.Value>(bitPattern: argumentsPtrBits)
+        let resultPtr = UnsafeMutablePointer<facebook.jsi.Value>(bitPattern: resultPtrBits)!
+        return forwardingSwiftErrorsToJS(runtime: runtime) {
+          let arguments = JavaScriptValuesBuffer(runtime, start: argumentsPtr, count: argumentsCount)
+          let thisValue = JavaScriptUnownedValue(runtime.pointee, thisPtr)
+          try context.call(thisValue, consume arguments).writeJSIValue(to: resultPtr)
+        }
+      }
+    }`;
+  jsContent = jsContent.replace(fn2Target, fn2Replacement);
+
   fs.writeFileSync(jsRuntimeFile, jsContent, 'utf8');
-  console.log('[patch] Patched JavaScriptRuntime.swift with factory create calls and appendPropNameForUtf8');
+  console.log('[patch] Patched JavaScriptRuntime.swift with factory create calls, appendPropNameForUtf8, and Swift 6 concurrency safe bitPattern casts');
 }
+
 
 // 6. Walk all remaining files for general fixes (Sendable, trailing commas, swift-tools-version)
 const targetDirs = [
