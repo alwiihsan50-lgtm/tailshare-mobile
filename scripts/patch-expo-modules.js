@@ -386,9 +386,9 @@ targetDirs.forEach(dir => {
           changed = true;
         }
 
-        // Any other weak let
+        // Any other weak let (change to weak var without duplicating modifiers)
         if (content.includes('weak let')) {
-          content = content.replace(/\bweak\s+let\b/g, 'nonisolated(unsafe) weak var');
+          content = content.replace(/\bweak\s+let\b/g, 'weak var');
           changed = true;
         }
 
@@ -406,4 +406,107 @@ targetDirs.forEach(dir => {
     });
   }
 });
+
+// 8. Surgical fixes for expo-modules-core source build under Xcode 16 / Swift 6
+const coreDir = path.join(__dirname, '..', 'node_modules', 'expo-modules-core');
+if (fs.existsSync(coreDir)) {
+  // 8a. ViewDefinition.swift
+  const viewDefFile = path.join(coreDir, 'ios', 'Core', 'Views', 'ViewDefinition.swift');
+  if (fs.existsSync(viewDefFile)) {
+    let c = fs.readFileSync(viewDefFile, 'utf8');
+    c = c.replace(/extension\s+UIView:\s*@MainActor\s+AnyArgument/g, '@MainActor extension UIView: AnyArgument');
+    fs.writeFileSync(viewDefFile, c, 'utf8');
+  }
+
+  // 8b. SwiftUIHostingView.swift
+  const hostingFile = path.join(coreDir, 'ios', 'Core', 'Views', 'SwiftUI', 'SwiftUIHostingView.swift');
+  if (fs.existsSync(hostingFile)) {
+    let c = fs.readFileSync(hostingFile, 'utf8');
+    c = c.replace(/internal\s+protocol\s+AnyExpoSwiftUIHostingView/g, '@MainActor internal protocol AnyExpoSwiftUIHostingView');
+    c = c.replace(/:\s*ExpoView,\s*@MainActor\s+AnyExpoSwiftUIHostingView/g, ': ExpoView, AnyExpoSwiftUIHostingView');
+    fs.writeFileSync(hostingFile, c, 'utf8');
+  }
+
+  // 8c. SwiftUIVirtualView.swift
+  const virtFile = path.join(coreDir, 'ios', 'Core', 'Views', 'SwiftUI', 'SwiftUIVirtualView.swift');
+  if (fs.existsSync(virtFile)) {
+    let c = fs.readFileSync(virtFile, 'utf8');
+    c = c.replace(/:\s*SwiftUIVirtualViewObjC,\s*@MainActor\s+ExpoSwiftUIView/g, ': SwiftUIVirtualViewObjC, ExpoSwiftUIView');
+    c = c.replace(/:\s*SwiftUIVirtualViewObjCDev,\s*@MainActor\s+ExpoSwiftUIView/g, ': SwiftUIVirtualViewObjCDev, ExpoSwiftUIView');
+    c = c.replace(/extension\s+ExpoSwiftUI\.SwiftUIVirtualView:\s*@MainActor\s+ExpoSwiftUI\.ViewWrapper/g, '@MainActor extension ExpoSwiftUI.SwiftUIVirtualView: ExpoSwiftUI.ViewWrapper');
+    c = c.replace(/extension\s+ExpoSwiftUI\.SwiftUIVirtualViewDev:\s*@MainActor\s+ExpoSwiftUI\.ViewWrapper/g, '@MainActor extension ExpoSwiftUI.SwiftUIVirtualViewDev: ExpoSwiftUI.ViewWrapper');
+    fs.writeFileSync(virtFile, c, 'utf8');
+  }
+
+  // 8d. ExpoSwiftUI.swift
+  const expoSwiftUIFile = path.join(coreDir, 'ios', 'Core', 'Views', 'SwiftUI', 'ExpoSwiftUI.swift');
+  if (fs.existsSync(expoSwiftUIFile)) {
+    let c = fs.readFileSync(expoSwiftUIFile, 'utf8');
+    c = c.replace(/public\s+protocol\s+ViewWrapper/g, '@MainActor public protocol ViewWrapper');
+    fs.writeFileSync(expoSwiftUIFile, c, 'utf8');
+  }
+
+  // 8e. SceneGeometry.swift
+  const sceneGeoFile = path.join(coreDir, 'ios', 'Utilities', 'SceneGeometry.swift');
+  if (fs.existsSync(sceneGeoFile)) {
+    let c = fs.readFileSync(sceneGeoFile, 'utf8');
+    c = c.replace(/public\s+enum\s+SceneGeometry/g, '@MainActor public enum SceneGeometry');
+    fs.writeFileSync(sceneGeoFile, c, 'utf8');
+  }
+
+  // 8f. DynamicSwiftUIViewType.swift
+  const dynViewFile = path.join(coreDir, 'ios', 'Core', 'DynamicTypes', 'DynamicSwiftUIViewType.swift');
+  if (fs.existsSync(dynViewFile)) {
+    let c = fs.readFileSync(dynViewFile, 'utf8');
+    c = c.replace(/performSynchronouslyOnMainThread/g, 'performSynchronouslyOnMainActor');
+    fs.writeFileSync(dynViewFile, c, 'utf8');
+  }
+
+  // 8g. ExpoReactDelegate.swift
+  const reactDelFile = path.join(coreDir, 'ios', 'ReactDelegates', 'ExpoReactDelegate.swift');
+  if (fs.existsSync(reactDelFile)) {
+    let c = fs.readFileSync(reactDelFile, 'utf8');
+    c = c.replace(/public\s+func\s+createRootViewController\(\)/g, '@MainActor public func createRootViewController()');
+    fs.writeFileSync(reactDelFile, c, 'utf8');
+  }
+
+  // 8h. URLAuthenticationChallengeForwardSender.swift
+  const authFile = path.join(coreDir, 'ios', 'DevTools', 'URLAuthenticationChallengeForwardSender.swift');
+  if (fs.existsSync(authFile)) {
+    let c = fs.readFileSync(authFile, 'utf8');
+    c = c.replace(/let\s+completionHandler:\s*\(/g, 'nonisolated(unsafe) let completionHandler: (');
+    fs.writeFileSync(authFile, c, 'utf8');
+  }
+
+  // 8i. URLSessionSessionDelegateProxy.swift
+  const proxyFile = path.join(coreDir, 'ios', 'DevTools', 'URLSessionSessionDelegateProxy.swift');
+  if (fs.existsSync(proxyFile)) {
+    let c = fs.readFileSync(proxyFile, 'utf8');
+    c = c.replace(/private\s+var\s+delegateMap:/g, 'private nonisolated(unsafe) var delegateMap:');
+    fs.writeFileSync(proxyFile, c, 'utf8');
+  }
+
+  // 8j. SwiftUIViewFrameObserver.swift
+  const frameObsFile = path.join(coreDir, 'ios', 'Core', 'Views', 'SwiftUI', 'SwiftUIViewFrameObserver.swift');
+  if (fs.existsSync(frameObsFile)) {
+    let c = fs.readFileSync(frameObsFile, 'utf8');
+    c = c.replace(/observer\s*=\s*view\.observe\(\\\.bounds,\s*options:\s*\[\.old,\s*\.new\]\)\s*\{\s*view,\s*change\s*in[\s\S]*?callback\(CGRect\(origin:\s*view\.frame\.origin,\s*size:\s*newValue\.size\)\)\s*\}/, `nonisolated(unsafe) let safeView = view
+      observer = view.observe(\\.bounds, options: [.old, .new]) { _, change in
+        guard let newValue = change.newValue else { return }
+        callback(CGRect(origin: safeView.frame.origin, size: newValue.size))
+      }`);
+    fs.writeFileSync(frameObsFile, c, 'utf8');
+  }
+
+  // 8k. Set swift_version to 5.9 in ExpoModulesCore.podspec as fallback safety
+  const corePodspec = path.join(coreDir, 'ExpoModulesCore.podspec');
+  if (fs.existsSync(corePodspec)) {
+    let c = fs.readFileSync(corePodspec, 'utf8');
+    c = c.replace(/s\.swift_version\s*=\s*['"]6\.0['"]/g, "s.swift_version = '5.9'");
+    fs.writeFileSync(corePodspec, c, 'utf8');
+  }
+
+  console.log('[patch] Applied surgical Swift 6 compatibility fixes to expo-modules-core');
+}
+
 
